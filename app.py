@@ -12,15 +12,15 @@ from spss_syntax_unified import generate_spss_syntax_unified
 
 app = Flask(__name__)
 
-# CORS - povolit z environment variable nebo všechny
-allowed_origin = os.environ.get('CORS_ORIGIN', '*')
-print(f"CORS allowed origin: {allowed_origin}")
+# ÚPLNĚ OTEVŘENÝ CORS - povolí všechny origins, všechny metody
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-CORS(app, 
-     resources={r"/*": {"origins": allowed_origin}},
-     supports_credentials=True,
-     allow_headers=["Content-Type"],
-     methods=["GET", "POST", "OPTIONS"])
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
@@ -31,23 +31,12 @@ ALLOWED_DOCX = {'docx'}
 def allowed_file(filename, allowed_extensions):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_extensions
 
-@app.after_request
-def after_request(response):
-    origin = request.headers.get('Origin')
-    if origin:
-        response.headers['Access-Control-Allow-Origin'] = origin
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Credentials'] = 'true'
-    return response
-
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok', 'message': 'Bad Respondents Detector API running'})
 
 @app.route('/api/analyze', methods=['POST', 'OPTIONS'])
 def analyze():
-    # Handle preflight
     if request.method == 'OPTIONS':
         return '', 204
         
