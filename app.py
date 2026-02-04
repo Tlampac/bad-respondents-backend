@@ -11,7 +11,15 @@ from bad_respondents_detector import analyze_with_questionnaire
 from spss_syntax_unified import generate_spss_syntax_unified
 
 app = Flask(__name__)
-CORS(app)  # Povolit CORS pro Netlify frontend
+
+# CORS - povolit všechny origins (pro testování)
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
@@ -26,8 +34,12 @@ def allowed_file(filename, allowed_extensions):
 def health():
     return jsonify({'status': 'ok', 'message': 'Bad Respondents Detector API running'})
 
-@app.route('/api/analyze', methods=['POST'])
+@app.route('/api/analyze', methods=['POST', 'OPTIONS'])
 def analyze():
+    # Handle preflight
+    if request.method == 'OPTIONS':
+        return '', 204
+        
     try:
         # Kontrola souborů
         if 'sav_file' not in request.files:
