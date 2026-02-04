@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bad Respondents Detector</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 800px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 32px;
+            text-align: center;
+        }
+
+        .subtitle {
+            color: #666;
+            text-align: center;
+            margin-bottom: 40px;
+            font-size: 16px;
+        }
+
+        .upload-section {
+            margin-bottom: 30px;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            margin-bottom: 20px;
+        }
+
+        .file-input-wrapper label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .file-input-button {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            border: 2px dashed #667eea;
+            border-radius: 12px;
+            background: #f8f9ff;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .file-input-button:hover {
+            border-color: #764ba2;
+            background: #f0f1ff;
+        }
+
+        .file-input-button.has-file {
+            border-color: #10b981;
+            background: #ecfdf5;
+        }
+
+        .file-name {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .file-name.selected {
+            color: #10b981;
+            font-weight: 500;
+        }
+
+        .analyze-button {
+            width: 100%;
+            padding: 18px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            margin-top: 20px;
+        }
+
+        .analyze-button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .analyze-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 30px;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .results {
+            display: none;
+            margin-top: 40px;
+            padding: 30px;
+            background: #f8f9ff;
+            border-radius: 12px;
+        }
+
+        .results.active {
+            display: block;
+        }
+
+        .results h2 {
+            color: #333;
+            margin-bottom: 25px;
+            font-size: 24px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 13px;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            color: #333;
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        .stat-value.bad {
+            color: #ef4444;
+        }
+
+        .stat-value.good {
+            color: #10b981;
+        }
+
+        .risk-section {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .risk-section h3 {
+            color: #333;
+            font-size: 18px;
+            margin-bottom: 15px;
+        }
+
+        .risk-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .risk-item:last-child {
+            border-bottom: none;
+        }
+
+        .download-button {
+            width: 100%;
+            padding: 16px;
+            background: #10b981;
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .download-button:hover {
+            background: #059669;
+            transform: translateY(-2px);
+        }
+
+        .error {
+            display: none;
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+
+        .error.active {
+            display: block;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 25px;
+            }
+
+            h1 {
+                font-size: 24px;
+            }
+
+            .stat-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 Bad Respondents Detector</h1>
+        <p class="subtitle">Analýza kvality respondentů v market research datech</p>
+
+        <div class="upload-section">
+            <div class="file-input-wrapper">
+                <label for="sav-file">1. Nahrajte SAV soubor s daty</label>
+                <div class="file-input-button" onclick="document.getElementById('sav-file').click()">
+                    <span class="file-name" id="sav-file-name">📁 Klikněte pro výběr .sav souboru</span>
+                </div>
+                <input type="file" id="sav-file" class="file-input" accept=".sav">
+            </div>
+
+            <div class="file-input-wrapper">
+                <label for="docx-file">2. Nahrajte dotazník (DOCX)</label>
+                <div class="file-input-button" onclick="document.getElementById('docx-file').click()">
+                    <span class="file-name" id="docx-file-name">📄 Klikněte pro výběr .docx souboru</span>
+                </div>
+                <input type="file" id="docx-file" class="file-input" accept=".docx">
+            </div>
+
+            <button class="analyze-button" id="analyze-button" disabled>
+                Analyzovat data
+            </button>
+        </div>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Probíhá analýza dat... Prosím čekejte.</p>
+        </div>
+
+        <div class="error" id="error"></div>
+
+        <div class="results" id="results">
+            <h2>📊 Výsledky analýzy</h2>
+
+            <div class="stat-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Celkem respondentů</div>
+                    <div class="stat-value" id="total-respondents">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Podezřelých</div>
+                    <div class="stat-value bad" id="total-bad">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Speeders</div>
+                    <div class="stat-value" id="speeders-count">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Straight-liners</div>
+                    <div class="stat-value" id="straight-count">-</div>
+                </div>
+            </div>
+
+            <div class="risk-section">
+                <h3>🎯 Doporučení pro čištění dat</h3>
+                <div class="risk-item">
+                    <span><strong>VYSOKÉ RIZIKO</strong> (2+ problémy - doporučeno smazat)</span>
+                    <span id="high-risk">-</span>
+                </div>
+                <div class="risk-item">
+                    <span><strong>STŘEDNÍ RIZIKO</strong> (1 problém - možná smazat)</span>
+                    <span id="medium-risk">-</span>
+                </div>
+                <div class="risk-item">
+                    <span><strong>NÍZKÉ RIZIKO</strong> (nechat)</span>
+                    <span id="low-risk">-</span>
+                </div>
+            </div>
+
+            <button class="download-button" id="download-button">
+                ⬇️ Stáhnout SPSS syntax
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = window.location.origin;
+        let syntaxFileName = '';
+
+        // File selection handling
+        const savFileInput = document.getElementById('sav-file');
+        const docxFileInput = document.getElementById('docx-file');
+        const analyzeButton = document.getElementById('analyze-button');
+
+        savFileInput.addEventListener('change', (e) => {
+            const fileName = e.target.files[0]?.name || 'Žádný soubor vybrán';
+            const fileNameElement = document.getElementById('sav-file-name');
+            fileNameElement.textContent = `✓ ${fileName}`;
+            fileNameElement.classList.add('selected');
+            fileNameElement.parentElement.classList.add('has-file');
+            checkFilesSelected();
+        });
+
+        docxFileInput.addEventListener('change', (e) => {
+            const fileName = e.target.files[0]?.name || 'Žádný soubor vybrán';
+            const fileNameElement = document.getElementById('docx-file-name');
+            fileNameElement.textContent = `✓ ${fileName}`;
+            fileNameElement.classList.add('selected');
+            fileNameElement.parentElement.classList.add('has-file');
+            checkFilesSelected();
+        });
+
+        function checkFilesSelected() {
+            analyzeButton.disabled = !(savFileInput.files.length && docxFileInput.files.length);
+        }
+
+        // Analysis
+        analyzeButton.addEventListener('click', async () => {
+            const formData = new FormData();
+            formData.append('sav_file', savFileInput.files[0]);
+            formData.append('docx_file', docxFileInput.files[0]);
+
+            // Show loading
+            document.getElementById('loading').classList.add('active');
+            document.getElementById('results').classList.remove('active');
+            document.getElementById('error').classList.remove('active');
+            analyzeButton.disabled = true;
+
+            try {
+                const response = await fetch(`${API_URL}/api/analyze`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Chyba při analýze');
+                }
+
+                // Display results
+                displayResults(data);
+                syntaxFileName = data.syntax_file;
+
+            } catch (error) {
+                document.getElementById('error').textContent = `❌ ${error.message}`;
+                document.getElementById('error').classList.add('active');
+            } finally {
+                document.getElementById('loading').classList.remove('active');
+                analyzeButton.disabled = false;
+            }
+        });
+
+        function displayResults(data) {
+            const r = data.results;
+
+            document.getElementById('total-respondents').textContent = r.total_respondents;
+            document.getElementById('total-bad').textContent = r.total_bad;
+            document.getElementById('speeders-count').textContent = r.speeders.count;
+            document.getElementById('straight-count').textContent = r.straight_liners.count;
+
+            document.getElementById('high-risk').textContent = r.recommendations.high_risk;
+            document.getElementById('medium-risk').textContent = r.recommendations.medium_risk;
+            document.getElementById('low-risk').textContent = r.recommendations.low_risk;
+
+            document.getElementById('results').classList.add('active');
+        }
+
+        // Download
+        document.getElementById('download-button').addEventListener('click', async () => {
+            window.location.href = `${API_URL}/api/download/${syntaxFileName}`;
+        });
+    </script>
+</body>
+</html>
