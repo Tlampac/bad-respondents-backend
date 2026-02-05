@@ -10,7 +10,7 @@ import traceback
 from bad_respondents_detector import analyze_with_questionnaire
 from spss_syntax_unified import generate_spss_syntax_unified
 
-  app = Flask(__name__, static_folder='static', static_url_path='')
+app = Flask(__name__, static_folder='static', static_url_path='')
 
 # ÚPLNĚ OTEVŘENÝ CORS - povolí všechny origins, všechny metody
 CORS(app, resources={r"/*": {"origins": "*"}})
