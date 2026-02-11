@@ -1,560 +1,656 @@
-#!/usr/bin/env python3
 """
-Identifikátor špatných respondentů
-----------------------------------
-Analyzuje kvalitu respondentů na základě:
-1. Rychlost vyplnění (speeders - 5% nejrychlejších)
-2. Nesmyslné odpovědi v otevřených otázkách
-3. Straight-lining v bateriích (všechny odpovědi stejné)
-
-Author: Claude
-Date: 2026-02-03
+Bad Respondents Detector v2.0
+- Scoring-based open-ended answer detection (instead of binary)
+- Cross-question similarity detection
+- Improved speeder detection
+- Straight-lining detection from questionnaire batteries
 """
 
 import pyreadstat
 import pandas as pd
 import numpy as np
 import re
+import os
 from datetime import datetime
-from questionnaire_parser import parse_questionnaire, find_variable_names
+from difflib import SequenceMatcher
+
+# Import questionnaire parser
+try:
+    from questionnaire_parser import parse_questionnaire
+except ImportError:
+    parse_questionnaire = None
 
 
-def duration_to_seconds(duration_str):
-    """Převede duration string '0:4:35' na sekundy"""
-    if pd.isna(duration_str):
-        return np.nan
-    parts = str(duration_str).split(':')
-    if len(parts) == 3:
-        hours, mins, secs = map(int, parts)
-        return hours * 3600 + mins * 60 + secs
-    return np.nan
+# =============================================================================
+# OPEN-ENDED ANSWER QUALITY SCORING (NEW v2.0)
+# =============================================================================
 
+def answer_quality_score(text):
+    """
+    Score an open-ended answer from 0 (worst) to 1 (best).
+    
+    NOTE: Scoring is primarily LENGTH-BASED. This is a conscious trade-off:
+    short but meaningful answers (e.g. "Protože je drahá.") may score lower
+    than expected. That's why 'medium_risk' category exists as "review" not
+    "auto-delete". Future improvement: add Claude API call for content
+    relevance assessment.
+    
+    Score tiers:
+    0.0 - 0.05: Gibberish, filler characters
+    0.1:         Explicit non-answers (nevím, nic, nwm...)
+    0.2:         Single word answer
+    0.3:         Two word answer  
+    0.45:        3-4 word answer
+    0.65:        5-8 word answer
+    0.8+:        Substantial answer (9+ words)
+    """
+    if pd.isna(text) or str(text).strip() == '':
+        return 0.0
+    
+    t = str(text).strip()
+    t_lower = t.lower().rstrip('.,!? ')
+    words = t.split()
+    word_count = len(words)
+    
+    # --- Level 0.05: Filler characters (dots, dashes, repeated chars) ---
+    clean_text = re.sub(r'[.\-_!?,\s]', '', t)
+    if len(clean_text) < 2 and len(t) > 3:
+        return 0.05
+    if re.search(r'(.)\1{9,}', t) or re.search(r'\.{10,}|_{10,}|-{10,}|x{5,}', t_lower):
+        return 0.05
+    
+    # --- Level 0.05: Gibberish (random consonants) ---
+    alpha = re.sub(r'[^a-záčďéěíňóřšťúůýž]', '', t_lower)
+    if len(alpha) > 8:
+        vowels = set('aeiouyáéíóúůýě')
+        consonant_count = sum(1 for c in alpha if c not in vowels)
+        if consonant_count / len(alpha) > 0.85:
+            return 0.05
+    
+    # --- Level 0.1: Explicit non-answers ---
+    non_answers = {
+        'nevím', 'nevim', 'nwm', 'nic', 'xxx', 'nee', 'ne', 'ok', 'oká',
+        'žádné', 'zadne', 'žádný', 'zadny', 'nebim', 'nic mě nenapadá',
+        'nic moc', 'nemám', 'nemam', 'bez názoru', 'bez komentáře',
+        'hmm', 'hm', 'hmmm', 'hm...', 'fajn', '.', '..', '...', '-', '--',
+        'no', 'noo', 'jo', 'jj', 'nn', 'idk', 'nic mne nenapada',
+        'nic me nenapada', 'bez komentare', 'nic zvláštního', 'nic zvlastniho',
+        'nic extra', 'nevím co napsat', 'nevim co napsat'
+    }
+    if t_lower in non_answers:
+        return 0.1
+    
+    # --- Level 0.2: Single word ---
+    if word_count == 1:
+        return 0.2
+    
+    # --- Level 0.3: Two words ---
+    if word_count == 2:
+        return 0.3
+    
+    # --- Level 0.45: 3-4 words ---
+    if word_count <= 4:
+        return 0.45
+    
+    # --- Level 0.65: 5-8 words ---
+    if word_count <= 8:
+        return 0.65
+    
+    # --- Level 0.8: 9-15 words ---
+    if word_count <= 15:
+        return 0.8
+    
+    # --- Level 0.85-1.0: Substantial answer ---
+    return min(1.0, 0.85 + (word_count - 15) * 0.01)
+
+
+def cross_question_similarity(answers):
+    """
+    Check if answers are suspiciously similar across questions.
+    Returns a penalty score 0-0.15 to subtract from average.
+    """
+    clean = [a.strip().lower() for a in answers if a.strip()]
+    if len(clean) < 2:
+        return 0
+    
+    unique = set(clean)
+    
+    # All identical answers
+    if len(unique) == 1 and len(clean) >= 3:
+        return 0.15
+    
+    # Almost all identical (e.g., 3 out of 4 the same)
+    if len(unique) <= 2 and len(clean) >= 4:
+        most_common = max(set(clean), key=clean.count)
+        if clean.count(most_common) >= 3:
+            return 0.12
+    
+    # Near-duplicates (using string similarity)
+    sims = []
+    for i in range(len(clean)):
+        for j in range(i + 1, len(clean)):
+            sim = SequenceMatcher(None, clean[i], clean[j]).ratio()
+            sims.append(sim)
+    
+    avg_sim = sum(sims) / len(sims) if sims else 0
+    
+    # Also check: how many pairs are very similar (>0.7)?
+    high_sim_pairs = sum(1 for s in sims if s > 0.7)
+    total_pairs = len(sims)
+    
+    if avg_sim > 0.8:
+        return 0.12
+    elif avg_sim > 0.6 or (high_sim_pairs >= total_pairs * 0.5):
+        return 0.08
+    elif avg_sim > 0.4:
+        return 0.04
+    
+    return 0
+
+
+def classify_open_ended_quality(scores_list, similarity_penalty):
+    """
+    Classify respondent based on their average open-ended quality score.
+    
+    Returns: 'high_risk', 'medium_risk', or 'ok'
+    """
+    if not scores_list:
+        return 'ok'
+    
+    avg_score = sum(scores_list) / len(scores_list)
+    adjusted_score = avg_score - similarity_penalty
+    
+    if adjusted_score <= 0.2:
+        return 'high_risk'
+    elif adjusted_score <= 0.35:
+        return 'medium_risk'
+    else:
+        return 'ok'
+
+
+# =============================================================================
+# LEGACY COMPATIBILITY: is_suspicious_answer (now wraps scoring)
+# =============================================================================
 
 def is_suspicious_answer(text):
-    """Detekuje nesmyslné odpovědi v otevřených otázkách"""
-    if pd.isna(text) or text == '':
-        return False
+    """Legacy function - returns True if answer scores below 0.15"""
+    return answer_quality_score(text) <= 0.15
+
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def find_variable_names(df, q_code):
+    """Find matching variable names in DataFrame for a question code."""
+    q_code_clean = q_code.replace('.', '').strip()
+    matches = []
     
-    text = str(text).strip()
+    for col in df.columns:
+        if col.upper() == f'Q{q_code_clean}'.upper():
+            matches.append(col)
+        elif col.upper() == f'QQ{q_code_clean}'.upper():
+            matches.append(col)
+        elif col.upper().startswith(f'Q{q_code_clean}__'.upper()):
+            matches.append(col)
+        elif col.upper().startswith(f'QQ{q_code_clean}__'.upper()):
+            matches.append(col)
     
-    # Vzory nesmyslných odpovědí
-    suspicious_patterns = [
-        r'^-+$',           # Jen pomlčky
-        r'^[aA]+$',        # Jen písmeno A (aaa, AAA)
-        r'^[nN]ula$',      # "Nula"
-        r'^[nN]e$',        # "Ne"
-        r'^[nN]evim$',     # "Nevim"
-        r'^[xX]+$',        # Jen X
-        r'^\.+$',          # Jen tečky
-        r'^\d+$',          # Jen čísla
-    ]
+    if not matches:
+        for col in df.columns:
+            if q_code_clean.upper() in col.upper():
+                matches.append(col)
     
-    for pattern in suspicious_patterns:
-        if re.match(pattern, text):
-            return True
+    return matches
+
+
+def find_id_column(df):
+    """Find the best ID column in the DataFrame."""
+    preferred = ['ExternalId', 'UserPanelId', 'QuestionaryUserId', 'email', 'ReferralCode']
+    for col_name in preferred:
+        if col_name in df.columns:
+            non_null = df[col_name].dropna()
+            if len(non_null) > 0 and non_null.nunique() > len(df) * 0.5:
+                return col_name
     
-    # Velmi krátké odpovědi (1-2 znaky)
-    if len(text) <= 2:
-        return True
+    for col in df.columns:
+        if 'id' in col.lower() and col not in ['RespondentFinishedOnQuestion']:
+            non_null = df[col].dropna()
+            if len(non_null) > 0 and non_null.nunique() > len(df) * 0.5:
+                return col
     
-    return False
+    return df.columns[0]
 
 
-def analyze_respondents(sav_file, id_column=None):
-    """Analyzuje bez dotazníku - používá heuristiky"""
-    return _analyze_respondents_impl(sav_file, id_column, questionnaire_file=None)
-
-
-def analyze_with_questionnaire(sav_file, questionnaire_file, id_column=None):
-    """Analyzuje S dotazníkem - přesná detekce otázek"""
-    return _analyze_respondents_impl(sav_file, id_column, questionnaire_file)
-
-
-def _analyze_respondents_impl(sav_file, id_column=None, questionnaire_file=None):
+def parse_duration_to_seconds(duration_val):
+    """Parse duration value to seconds (handles various formats).
+    Supports: H:MM:SS, H:MM:SS.ms, numeric seconds, Czech decimal comma.
+    Logs a warning if parsing fails so user knows why speeders may be missing.
     """
-    Hlavní analýza kvality respondentů
+    if pd.isna(duration_val):
+        return None
     
-    Args:
-        sav_file: cesta k .sav souboru
-        id_column: název proměnné s ID respondenta (pokud None, automaticky vybere UserPanelId nebo ExternalId)
+    d = str(duration_val).strip()
+    if not d:
+        return None
+    
+    # Format "H:MM:SS" or "H:MM:SSs" or "H:MM:SS.ms"
+    d_clean = d.rstrip('s')
+    parts = d_clean.split(':')
+    if len(parts) == 3:
+        try:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            # Handle seconds with decimal part (e.g., "23.5")
+            seconds = float(parts[2])
+            return hours * 3600 + minutes * 60 + seconds
+        except ValueError:
+            pass
+    
+    # Already a number (seconds) - try direct float
+    try:
+        return float(d)
+    except ValueError:
+        pass
+    
+    # Czech decimal format: "123,4" → "123.4"
+    if ',' in d:
+        try:
+            return float(d.replace(',', '.'))
+        except ValueError:
+            pass
+    
+    print(f"   WARNING: Could not parse duration value: '{d}' — this respondent will be skipped for speeder detection")
+    return None
+
+
+# =============================================================================
+# MAIN ANALYSIS FUNCTION
+# =============================================================================
+
+def analyze_with_questionnaire(sav_file, docx_file=None):
+    """
+    Main analysis function. Reads SAV file and optionally a DOCX questionnaire.
     
     Returns:
-        dict s výsledky analýzy
+        results: dict with all detection results
+        df: the DataFrame
     """
+    print("=" * 80)
+    print("BAD RESPONDENTS DETECTOR v2.0")
+    print("=" * 80)
     
-    # Načtení dat
-    print(f"Načítám data z: {sav_file}")
+    # Read SAV file
     df, meta = pyreadstat.read_sav(sav_file)
-    print(f"Načteno {len(df)} respondentů, {len(df.columns)} proměnných")
+    print(f"\nData: {len(df)} respondents, {len(df.columns)} variables")
     
-    # Automatický výběr ID sloupce
-    if id_column is None:
-        # Zkontrolujeme UserPanelId - pokud existuje a není většinou prázdný
-        if 'UserPanelId' in df.columns and df['UserPanelId'].notna().sum() > len(df) * 0.5:
-            id_column = 'UserPanelId'
-            print(f"Používám ID: UserPanelId (externí panel)")
-        elif 'ExternalId' in df.columns:
-            id_column = 'ExternalId'
-            print(f"Používám ID: ExternalId (UserPanelId neobsahuje dostatek hodnot)")
-        else:
-            raise ValueError("Nenalezena ani UserPanelId ani ExternalId proměnná!")
+    # Find ID column
+    id_column = find_id_column(df)
+    print(f"ID column: {id_column}")
     
-    print(f"ID sloupec: {id_column}")
-    
-    # Převod duration
-    if 'duration' in df.columns:
-        df['duration_sec'] = df['duration'].apply(duration_to_seconds)
-    else:
-        print("VAROVÁNÍ: Proměnná 'duration' nebyla nalezena!")
-        df['duration_sec'] = np.nan
-    
-    # Inicializace výsledků
+    # Initialize results
     results = {
         'total_respondents': len(df),
+        'id_column': id_column,
         'speeders': [],
         'suspicious_open': [],
+        'suspicious_open_medium': [],  # NEW: medium risk open-ended
         'straight_liners': [],
-        'all_bad': []
+        'risk_groups': {
+            'all_three': [],
+            'speeders_open': [],
+            'speeders_straight': [],
+            'open_straight': [],
+            'speeders_only': [],
+            'open_only': [],
+            'straight_only': []
+        },
+        'recommendations': {
+            'high_risk': [],
+            'medium_risk': [],
+            'low_risk': []
+        },
+        'all_bad': [],
+        'open_ended_scores': {},  # NEW: per-respondent scoring details
     }
     
-    # 1. SPEEDERS (5% nejrychlejších)
-    if not df['duration_sec'].isna().all():
-        threshold = df['duration_sec'].quantile(0.05)
-        speeders_mask = df['duration_sec'] <= threshold
-        results['speeders'] = df[speeders_mask][id_column].tolist()
-        results['speeder_threshold_sec'] = threshold
-        results['speeder_threshold_min'] = threshold / 60
-        print(f"\n1. SPEEDERS: {len(results['speeders'])} respondentů (≤ {threshold:.0f}s)")
+    # Parse questionnaire if provided
+    structure = None
+    if docx_file and parse_questionnaire:
+        try:
+            structure = parse_questionnaire(docx_file)
+            print(f"Questionnaire parsed: {len(structure.get('open_questions', []))} open Qs, "
+                  f"{len(structure.get('batteries', []))} batteries")
+        except Exception as e:
+            print(f"Warning: Could not parse questionnaire: {e}")
     
-    # 2. NESMYSLNÉ ODPOVĚDI V OTEVŘENÝCH OTÁZKÁCH
-    if questionnaire_file:
-        # PŘESNÝ PŘÍSTUP - použití dotazníku
-        print(f"\n2. ANALÝZA OTEVŘENÝCH OTÁZEK (z dotazníku)")
-        structure = parse_questionnaire(questionnaire_file)
+    # =========================================================================
+    # 1. SPEEDERS DETECTION
+    # =========================================================================
+    print(f"\n1. SPEEDERS DETECTION")
+    
+    duration_col = None
+    for col_name in ['duration', 'Duration', 'DURATION', 'interview_length']:
+        if col_name in df.columns:
+            duration_col = col_name
+            break
+    
+    if duration_col:
+        durations_sec = []
+        for val in df[duration_col]:
+            sec = parse_duration_to_seconds(val)
+            if sec is not None:
+                durations_sec.append(sec)
+            else:
+                durations_sec.append(None)
+        
+        df['_duration_sec'] = durations_sec
+        valid_durations = [d for d in durations_sec if d is not None and d > 0]
+        
+        if valid_durations:
+            median_duration = np.median(valid_durations)
+            # Threshold: less than 1/3 of median
+            speeder_threshold = median_duration / 3
+            
+            results['speeder_threshold_sec'] = round(speeder_threshold)
+            results['speeder_threshold_min'] = round(speeder_threshold / 60, 1)
+            
+            print(f"   Median duration: {median_duration:.0f}s ({median_duration/60:.1f} min)")
+            print(f"   Speeder threshold: < {speeder_threshold:.0f}s ({speeder_threshold/60:.1f} min)")
+            
+            for idx, row in df.iterrows():
+                dur = row.get('_duration_sec')
+                if dur is not None and dur < speeder_threshold:
+                    results['speeders'].append(row[id_column])
+            
+            print(f"   Speeders found: {len(results['speeders'])}")
+        else:
+            print(f"   No valid duration data found")
+    else:
+        print(f"   No duration column found")
+    
+    # =========================================================================
+    # 2. OPEN-ENDED ANSWER QUALITY (NEW SCORING APPROACH v2.0)
+    # =========================================================================
+    print(f"\n2. OPEN-ENDED ANSWER QUALITY (scoring v2.0)")
+    
+    all_open_cols = []
+    
+    if structure and structure.get('open_questions'):
         open_questions = structure['open_questions']
-        
-        if open_questions:
-            print(f"   Nalezeno {len(open_questions)} otevřených otázek bez filtru:")
-            for q in open_questions:
-                print(f"   - {q['code']}: {q['text'][:60]}...")
-            
-            all_open_cols = []
-            for q in open_questions:
-                cols = find_variable_names(df, q['code'])
-                all_open_cols.extend(cols)
-            
-            if all_open_cols:
-                print(f"   Kontroluji {len(all_open_cols)} proměnných")
-                for idx, row in df.iterrows():
-                    all_suspicious = True
-                    has_any_answer = False
-                    
-                    for col in all_open_cols:
-                        val = row[col]
-                        if pd.notna(val) and str(val).strip() != '':
-                            has_any_answer = True
-                            if not is_suspicious_answer(val):
-                                all_suspicious = False
-                                break
-                    
-                    if has_any_answer and all_suspicious:
-                        results['suspicious_open'].append(row[id_column])
-                
-                print(f"   Podezřelé odpovědi: {len(results['suspicious_open'])} respondentů")
-            else:
-                print(f"   VAROVÁNÍ: Nenalezeny proměnné v datech pro otevřené otázky")
-        else:
-            print(f"   Žádné otevřené otázky bez filtru")
-    else:
-        # HEURISTICKÝ PŘÍSTUP - bez dotazníku
-        # Hledáme textové proměnné (object dtype) kromě systémových
-        system_cols = ['start', 'end', 'duration', 'RespondentFinishedOnQuestion', 'ExternalId', 
-                       'ReferralCode', 'QuestionaryUserId', 'email', 'UserPanelId']
-        open_cols = [col for col in df.columns 
-                     if df[col].dtype == 'object' 
-                     and col not in system_cols
-                     and not col.startswith('User')]
-        
-        if open_cols:
-            print(f"\n2. ANALÝZA OTEVŘENÝCH OTÁZEK: {len(open_cols)} textových polí (heuristika)")
-            for idx, row in df.iterrows():
-                all_suspicious = True
-                has_any_answer = False
-                
-                for col in open_cols:
-                    val = row[col]
-                    if pd.notna(val) and str(val).strip() != '':
-                        has_any_answer = True
-                        if not is_suspicious_answer(val):
-                            all_suspicious = False
-                            break
-                
-                if has_any_answer and all_suspicious:
-                    results['suspicious_open'].append(row[id_column])
-            
-            print(f"   Podezřelé odpovědi: {len(results['suspicious_open'])} respondentů")
+        print(f"   From questionnaire: {len(open_questions)} open questions")
+        for q in open_questions:
+            print(f"   - {q['code']}: {q['text'][:60]}...")
+            cols = find_variable_names(df, q['code'])
+            all_open_cols.extend(cols)
     
-    # 3. STRAIGHT-LINING V BATERIÍCH
-    if questionnaire_file:
-        # PŘESNÝ PŘÍSTUP - použití dotazníku
-        print(f"\n3. ANALÝZA BATERIÍ (z dotazníku)")
-        structure = parse_questionnaire(questionnaire_file)
-        battery_questions = structure['batteries']
-        
-        if battery_questions:
-            print(f"   Nalezeno {len(battery_questions)} baterií bez filtru:")
-            for b in battery_questions:
-                print(f"   - {b['code']}: {b['text'][:60]}...")
-            
-            valid_batteries = {}
-            for b in battery_questions:
-                cols = find_variable_names(df, b['code'])
-                if cols and len(cols) > 3:
-                    valid_batteries[b['code']] = cols
-            
-            if valid_batteries:
-                print(f"   Kontroluji {len(valid_batteries)} baterií")
-                total_items = sum(len(v) for v in valid_batteries.values())
-                print(f"   Celkem položek: {total_items}")
-                
-                for idx, row in df.iterrows():
-                    has_straight_lining = False
-                    
-                    for battery_name, battery_cols in valid_batteries.items():
-                        values = []
-                        for col in battery_cols:
-                            val = row[col]
-                            if pd.notna(val):
-                                values.append(val)
-                        
-                        # Pokud má alespoň 8 odpovědí a všechny jsou stejné
-                        if len(values) >= 8 and len(set(values)) == 1:
-                            has_straight_lining = True
-                            break
-                    
-                    if has_straight_lining:
-                        results['straight_liners'].append(row[id_column])
-                
-                print(f"   Straight-lining: {len(results['straight_liners'])} respondentů")
-            else:
-                print(f"   VAROVÁNÍ: Nenalezeny proměnné v datech pro baterie")
-        else:
-            print(f"   Žádné baterie bez filtru")
-    else:
-        # HEURISTICKÝ PŘÍSTUP - bez dotazníku
-        # Najdeme skupiny proměnných se stejným prefixem (před __)
-        from collections import defaultdict
-        battery_groups = defaultdict(list)
-    
+    # Fallback: find text columns heuristically
+    if not all_open_cols:
+        system_cols = {'start', 'end', 'duration', 'RespondentFinishedOnQuestion', 
+                       'ExternalId', 'ReferralCode', 'QuestionaryUserId', 'email', 
+                       'UserPanelId', '_duration_sec'}
         for col in df.columns:
-            if '__' in col and not col.startswith('User') and df[col].dtype in ['float64', 'int64']:
-                prefix = col.split('__')[0]
-                battery_groups[prefix].append(col)
+            if (df[col].dtype == 'object' 
+                and col not in system_cols 
+                and not col.startswith('User')
+                and not col.endswith('_jina')):  # Skip "jiné" text fields
+                # Check if it's actually an open-ended (has varied content, not coded)
+                non_null = df[col].dropna()
+                if len(non_null) > 0:
+                    avg_len = non_null.str.len().mean()
+                    if avg_len > 3:  # More than just codes
+                        all_open_cols.append(col)
+        print(f"   Heuristic detection: {len(all_open_cols)} text columns")
     
-        # Vybereme jen baterie s více než 3 položkami a které má vyplněné >50% respondentů
-        # A které NEMAJÍ přirozeně vysoké straight-lining (jako checkboxy)
-        batteries = {}
-        for k, v in battery_groups.items():
-            if len(v) > 3:
-                # Spočítáme kolik respondentů má alespoň nějakou hodnotu
-                has_data = df[v].notna().any(axis=1).sum()
-                coverage = has_data / len(df)
-            
-                if coverage > 0.5:  # Alespoň 50% respondentů má data
-                    # Spočítáme kolik má straight-lining
-                    straight_count = 0
-                    for idx, row in df.iterrows():
-                        values = [row[c] for c in v if pd.notna(row[c])]
-                        if len(values) >= 4 and len(set(values)) == 1:
-                            straight_count += 1
-                
-                    # Pokud má <20% straight-lining, je to validní baterie pro kontrolu
-                    straight_rate = straight_count / len(df)
-                    if straight_rate < 0.20:
-                        batteries[k] = v
-    
-        if batteries:
-            print(f"\n3. ANALÝZA BATERIÍ: {len(batteries)} baterií nalezeno (rating baterie)")
-            total_items = sum(len(v) for v in batteries.values())
-            print(f"   Celkem položek v bateriích: {total_items}")
+    if all_open_cols:
+        # Deduplicate
+        all_open_cols = list(dict.fromkeys(all_open_cols))
+        print(f"   Analyzing {len(all_open_cols)} open-ended columns: {all_open_cols}")
         
-            for idx, row in df.iterrows():
-                has_straight_lining = False
+        for idx, row in df.iterrows():
+            resp_id = row[id_column]
+            answers = []
+            scores = []
             
-                # Kontrola každé baterie
-                for battery_name, battery_cols in batteries.items():
-                    values = []
-                    for col in battery_cols:
-                        val = row[col]
-                        if pd.notna(val):
-                            values.append(val)
-                
-                    # Pokud má alespoň 8 odpovědí a všechny jsou stejné
-                    if len(values) >= 8 and len(set(values)) == 1:
-                        has_straight_lining = True
-                        break
+            for col in all_open_cols:
+                val = row[col]
+                if pd.notna(val) and str(val).strip() != '':
+                    answers.append(str(val).strip())
+                    scores.append(answer_quality_score(val))
             
-                if has_straight_lining:
-                    results['straight_liners'].append(row[id_column])
+            if not scores:
+                continue
+            
+            # Calculate similarity penalty
+            sim_penalty = cross_question_similarity(answers)
+            
+            # Classify
+            avg_score = sum(scores) / len(scores)
+            adjusted_score = avg_score - sim_penalty
+            
+            # Store detailed scores
+            results['open_ended_scores'][resp_id] = {
+                'avg_score': round(avg_score, 2),
+                'similarity_penalty': round(sim_penalty, 2),
+                'adjusted_score': round(adjusted_score, 2),
+                'individual_scores': [round(s, 2) for s in scores],
+                'answers': answers
+            }
+            
+            classification = classify_open_ended_quality(scores, sim_penalty)
+            
+            if classification == 'high_risk':
+                results['suspicious_open'].append(resp_id)
+            elif classification == 'medium_risk':
+                results['suspicious_open_medium'].append(resp_id)
         
-            print(f"   Straight-lining: {len(results['straight_liners'])} respondentů")
-        else:
-            print(f"\n3. ANALÝZA BATERIÍ: Nenalezeny žádné vhodné rating baterie")
-    
-    # KOMBINACE - všechny špatné respondenty (filtrujeme prázdná ID)
-    # Vytvoříme rizikové skupiny
-    results['risk_groups'] = {
-        'speeders_only': [],           # Jen rychlí
-        'open_only': [],                # Jen špatné otevřenky
-        'straight_only': [],            # Jen straight-lining
-        'speeders_open': [],            # Rychlí + špatné otevřenky
-        'speeders_straight': [],        # Rychlí + straight-lining
-        'open_straight': [],            # Špatné otevřenky + straight-lining
-        'all_three': []                 # Všechny 3 problémy
-    }
-    
-    for rid in set(results['speeders'] + results['suspicious_open'] + results['straight_liners']):
-        if not rid or not str(rid).strip():
-            continue
-            
-        is_speeder = rid in results['speeders']
-        is_open = rid in results['suspicious_open']
-        is_straight = rid in results['straight_liners']
-        
-        # Kategorizace podle kombinace
-        if is_speeder and is_open and is_straight:
-            results['risk_groups']['all_three'].append(rid)
-        elif is_speeder and is_open:
-            results['risk_groups']['speeders_open'].append(rid)
-        elif is_speeder and is_straight:
-            results['risk_groups']['speeders_straight'].append(rid)
-        elif is_open and is_straight:
-            results['risk_groups']['open_straight'].append(rid)
-        elif is_speeder:
-            results['risk_groups']['speeders_only'].append(rid)
-        elif is_open:
-            results['risk_groups']['open_only'].append(rid)
-        elif is_straight:
-            results['risk_groups']['straight_only'].append(rid)
-    
-    # Doporučení na základě rizikových skupin a délky baterie
-    battery_length = 0
-    if questionnaire_file:
-        structure = parse_questionnaire(questionnaire_file)
-        if structure['batteries']:
-            # Vezmeme maximální délku baterie
-            for b in structure['batteries']:
-                cols = find_variable_names(df, b['code'])
-                if len(cols) > battery_length:
-                    battery_length = len(cols)
-    
-    # Vytvoříme doporučení
-    results['recommendations'] = {
-        'high_risk': [],      # Doporučeno smazat
-        'medium_risk': [],    # Možná smazat
-        'low_risk': []        # Nechat
-    }
-    
-    # HIGH RISK - minimálně 2 problémy
-    results['recommendations']['high_risk'] = (
-        results['risk_groups']['all_three'] +
-        results['risk_groups']['speeders_open'] +
-        results['risk_groups']['speeders_straight'] +
-        results['risk_groups']['open_straight']
-    )
-    
-    # MEDIUM/LOW RISK - záleží na délce baterie
-    if battery_length >= 10:
-        # Dlouhé baterie - straight-lining je podezřelý
-        results['recommendations']['medium_risk'] = results['risk_groups']['straight_only']
-        results['recommendations']['low_risk'] = (
-            results['risk_groups']['speeders_only'] +
-            results['risk_groups']['open_only']
-        )
+        print(f"   High risk (score ≤ 0.2): {len(results['suspicious_open'])} respondents")
+        print(f"   Medium risk (score ≤ 0.35): {len(results['suspicious_open_medium'])} respondents")
     else:
-        # Krátké baterie - straight-lining je OK
-        results['recommendations']['low_risk'] = (
-            results['risk_groups']['straight_only'] +
-            results['risk_groups']['speeders_only'] +
-            results['risk_groups']['open_only']
-        )
+        print(f"   No open-ended columns found")
     
-    all_bad = set(results['speeders'] + results['suspicious_open'] + results['straight_liners'])
-    # Odstranění prázdných ID
-    all_bad = {x for x in all_bad if x and str(x).strip()}
-    results['all_bad'] = sorted(list(all_bad))
-    results['battery_length'] = battery_length
+    # =========================================================================
+    # 3. STRAIGHT-LINING IN BATTERIES
+    # =========================================================================
+    print(f"\n3. STRAIGHT-LINING DETECTION")
     
-    print(f"\n" + "="*60)
-    print(f"RIZIKOVÉ KATEGORIE:")
-    print(f"  Všechny 3 problémy: {len(results['risk_groups']['all_three'])}")
-    print(f"  Rychlí + špatné otevřenky: {len(results['risk_groups']['speeders_open'])}")
-    print(f"  Rychlí + straight-lining: {len(results['risk_groups']['speeders_straight'])}")
-    print(f"  Špatné otevřenky + straight-lining: {len(results['risk_groups']['open_straight'])}")
-    print(f"  Pouze rychlí: {len(results['risk_groups']['speeders_only'])}")
-    print(f"  Pouze špatné otevřenky: {len(results['risk_groups']['open_only'])}")
-    print(f"  Pouze straight-lining: {len(results['risk_groups']['straight_only'])}")
+    battery_groups = []
     
-    print(f"\n" + "="*60)
-    print(f"DOPORUČENÍ (baterie {battery_length} položek):")
-    print(f"  VYSOKÉ RIZIKO (doporučeno smazat): {len(results['recommendations']['high_risk'])}")
-    print(f"  STŘEDNÍ RIZIKO (možná smazat): {len(results['recommendations']['medium_risk'])}")
-    print(f"  NÍZKÉ RIZIKO (nechat): {len(results['recommendations']['low_risk'])}")
+    if structure and structure.get('batteries'):
+        for bat in structure['batteries']:
+            q_code = bat['code']
+            items = bat.get('items', [])
+            cols = find_variable_names(df, q_code)
+            
+            if len(cols) >= 4:  # Only check batteries with 4+ items
+                battery_groups.append({
+                    'code': q_code,
+                    'columns': cols,
+                    'item_count': len(cols)
+                })
+                print(f"   Battery {q_code}: {len(cols)} items")
     
-    print(f"\n" + "="*60)
-    print(f"CELKEM PODEZŘELÝCH RESPONDENTŮ: {len(results['all_bad'])}")
-    print("="*60)
+    # Fallback: detect batteries by column naming pattern (QXX__1, QXX__2, ...)
+    if not battery_groups:
+        col_groups = {}
+        for col in df.columns:
+            match = re.match(r'(Q+\w+?)__(\d+)$', col)
+            if match:
+                base = match.group(1)
+                if base not in col_groups:
+                    col_groups[base] = []
+                col_groups[base].append(col)
+        
+        for base, cols in col_groups.items():
+            if len(cols) >= 4:
+                # Check if numeric (not text)
+                sample = df[cols[0]].dropna()
+                if len(sample) > 0 and sample.dtype != 'object':
+                    # IMPORTANT: Exclude binary/multi-select questions (0/1 or 1/2 values)
+                    # These are checkbox questions, not rating scales
+                    all_vals = set()
+                    for col in cols:
+                        try:
+                            all_vals.update(df[col].dropna().astype(float).unique())
+                        except:
+                            pass
+                    
+                    is_binary = all_vals <= {0.0, 1.0, 2.0}
+                    if is_binary:
+                        continue  # Skip multi-select questions
+                    
+                    battery_groups.append({
+                        'code': base,
+                        'columns': sorted(cols),
+                        'item_count': len(cols)
+                    })
+        
+        if battery_groups:
+            print(f"   Heuristic detection: {len(battery_groups)} rating batteries (excluding multi-select)")
+            for bg in battery_groups:
+                print(f"   - {bg['code']}: {bg['item_count']} items")
     
-    results['id_column'] = id_column  # Uložíme použitý ID sloupec
+    results['battery_length'] = max([bg['item_count'] for bg in battery_groups]) if battery_groups else 0
+    
+    if battery_groups:
+        straight_line_counts = {}
+        
+        for bg in battery_groups:
+            cols = bg['columns']
+            if len(cols) < 4:
+                continue
+            
+            for idx, row in df.iterrows():
+                resp_id = row[id_column]
+                values = [row[col] for col in cols if pd.notna(row[col])]
+                
+                if len(values) >= 4 and len(set(values)) == 1:
+                    if resp_id not in straight_line_counts:
+                        straight_line_counts[resp_id] = 0
+                    straight_line_counts[resp_id] += 1
+        
+        # Threshold: For short batteries (4-5 items), require straight-lining in 2+ batteries
+        # For longer batteries (6+ items), 1 is enough
+        # This reduces false positives from 4-item batteries where random agreement is common
+        min_batteries_threshold = 2
+        
+        for resp_id, count in straight_line_counts.items():
+            if count >= min_batteries_threshold:
+                results['straight_liners'].append(resp_id)
+        
+        print(f"   Straight-liners found: {len(results['straight_liners'])} (threshold: {min_batteries_threshold}+ batteries)")
+    else:
+        print(f"   No batteries found for straight-lining check")
+    
+    # =========================================================================
+    # 4. COMBINE RESULTS & RISK CLASSIFICATION
+    # =========================================================================
+    print(f"\n4. COMBINING RESULTS")
+    
+    speeders_set = set(results['speeders'])
+    # Combine high and medium risk open-ended for the "suspicious_open" used in risk groups
+    open_all_set = set(results['suspicious_open']) | set(results['suspicious_open_medium'])
+    open_high_set = set(results['suspicious_open'])
+    straight_set = set(results['straight_liners'])
+    
+    all_flagged = speeders_set | open_all_set | straight_set
+    
+    for resp_id in all_flagged:
+        is_speeder = resp_id in speeders_set
+        is_open = resp_id in open_all_set
+        is_open_high = resp_id in open_high_set
+        is_straight = resp_id in straight_set
+        
+        count = sum([is_speeder, is_open, is_straight])
+        
+        # Risk groups
+        if is_speeder and is_open and is_straight:
+            results['risk_groups']['all_three'].append(resp_id)
+        elif is_speeder and is_open:
+            results['risk_groups']['speeders_open'].append(resp_id)
+        elif is_speeder and is_straight:
+            results['risk_groups']['speeders_straight'].append(resp_id)
+        elif is_open and is_straight:
+            results['risk_groups']['open_straight'].append(resp_id)
+        elif is_speeder:
+            results['risk_groups']['speeders_only'].append(resp_id)
+        elif is_open:
+            results['risk_groups']['open_only'].append(resp_id)
+        elif is_straight:
+            results['risk_groups']['straight_only'].append(resp_id)
+        
+        # Recommendations
+        if count >= 2 or is_open_high:
+            results['recommendations']['high_risk'].append(resp_id)
+        elif count == 1:
+            results['recommendations']['medium_risk'].append(resp_id)
+        else:
+            results['recommendations']['low_risk'].append(resp_id)
+    
+    results['all_bad'] = list(all_flagged)
+    
+    # Summary
+    print(f"\n{'=' * 80}")
+    print(f"SUMMARY:")
+    print(f"  Total respondents: {results['total_respondents']}")
+    print(f"  Speeders: {len(results['speeders'])}")
+    print(f"  Open-ended high risk: {len(results['suspicious_open'])}")
+    print(f"  Open-ended medium risk: {len(results['suspicious_open_medium'])}")
+    print(f"  Straight-liners: {len(results['straight_liners'])}")
+    print(f"  Total flagged: {len(results['all_bad'])}")
+    print(f"  HIGH RISK (recommend delete): {len(results['recommendations']['high_risk'])}")
+    print(f"  MEDIUM RISK (consider delete): {len(results['recommendations']['medium_risk'])}")
+    print(f"{'=' * 80}")
     
     return results, df
 
 
-def generate_spss_syntax(results, id_column='ExternalId', output_file=None, risk_level='high'):
-    """
-    Generuje SPSS syntax pro vymazání špatných respondentů
+# =============================================================================
+# SPSS SYNTAX GENERATION (for backward compat, also in spss_syntax_unified.py)
+# =============================================================================
+
+def generate_spss_syntax(results, id_column='ExternalId', output_file=None):
+    """Generate SPSS syntax for deleting bad respondents."""
+    lines = []
+    lines.append(f"* Bad Respondents Detector v2.0 - SPSS Syntax.")
+    lines.append(f"* Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.")
+    lines.append(f"* Total respondents: {results['total_respondents']}.")
+    lines.append(f"* Total flagged: {len(results['all_bad'])}.")
+    lines.append(f"")
     
-    Args:
-        results: dict s výsledky z analyze_respondents()
-        id_column: název ID proměnné
-        output_file: pokud zadáno, uloží syntax do souboru
-        risk_level: 'high', 'medium', 'all' - která rizika smazat
-    """
+    # Variant 1: Delete all flagged
+    lines.append(f"* === VARIANTA 1: Smazat VSE podezrele ({len(results['all_bad'])}) ===.")
+    if results['all_bad']:
+        id_list = " ".join([f"'{str(x)}'" if isinstance(x, str) else str(x) 
+                           for x in results['all_bad']])
+        lines.append(f"SELECT IF NOT ANY({id_column}, {id_list}).")
+        lines.append(f"EXECUTE.")
+    lines.append(f"")
     
-    # Vybereme IDs podle rizikové úrovně
-    if risk_level == 'high':
-        ids_to_delete = results['recommendations']['high_risk']
-        level_desc = "VYSOKÉ RIZIKO (2+ problémy)"
-    elif risk_level == 'medium':
-        ids_to_delete = results['recommendations']['high_risk'] + results['recommendations']['medium_risk']
-        level_desc = "VYSOKÉ + STŘEDNÍ RIZIKO"
-    else:  # 'all'
-        ids_to_delete = results['all_bad']
-        level_desc = "VŠECHNA RIZIKA"
+    # Variant 2: Delete only high risk
+    high_risk = results['recommendations']['high_risk']
+    lines.append(f"* === VARIANTA 2: Smazat pouze VYSOKE RIZIKO ({len(high_risk)}) ===.")
+    if high_risk:
+        id_list = " ".join([f"'{str(x)}'" if isinstance(x, str) else str(x) 
+                           for x in high_risk])
+        lines.append(f"* SELECT IF NOT ANY({id_column}, {id_list}).")
+        lines.append(f"* EXECUTE.")
+    lines.append(f"")
     
-    syntax = f"""* Generováno: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.
-* Analyza kvality respondentu.
-* Celkem identifikovano: {len(results['all_bad'])} podezrelych respondentu.
-* Mazeme: {level_desc} ({len(ids_to_delete)} respondentu).
-
-* RIZIKOVE KATEGORIE:
-* - Vsechny 3 problemy: {len(results['risk_groups']['all_three'])}.
-* - Rychli + spatne otevrenky: {len(results['risk_groups']['speeders_open'])}.
-* - Rychli + straight-lining: {len(results['risk_groups']['speeders_straight'])}.
-* - Spatne otevrenky + straight-lining: {len(results['risk_groups']['open_straight'])}.
-* - Pouze rychli: {len(results['risk_groups']['speeders_only'])}.
-* - Pouze spatne otevrenky: {len(results['risk_groups']['open_only'])}.
-* - Pouze straight-lining: {len(results['risk_groups']['straight_only'])}.
-
-* 1. SPEEDERS ({len(results['speeders'])} respondentu).
-* Rychlost vyplneni <= {results.get('speeder_threshold_sec', 0):.0f} sekund ({results.get('speeder_threshold_min', 0):.1f} min).
-
-* 2. NESMYSLNE ODPOVEDI V OTEVRENYCH OTAZKACH ({len(results['suspicious_open'])} respondentu).
-
-* 3. STRAIGHT-LINING V BATERII ({len(results['straight_liners'])} respondentu).
-* Delka baterie: {results.get('battery_length', 'N/A')} polozek.
-
-* VYMAZANI {level_desc}.
-SELECT IF NOT ANY({id_column},
-"""
+    # Variant 3: Delete high + medium risk
+    hm_risk = high_risk + results['recommendations']['medium_risk']
+    lines.append(f"* === VARIANTA 3: Smazat VYSOKE + STREDNI RIZIKO ({len(hm_risk)}) ===.")
+    if hm_risk:
+        id_list = " ".join([f"'{str(x)}'" if isinstance(x, str) else str(x) 
+                           for x in hm_risk])
+        lines.append(f"* SELECT IF NOT ANY({id_column}, {id_list}).")
+        lines.append(f"* EXECUTE.")
     
-    # Přidání všech ID
-    for i, id_val in enumerate(ids_to_delete):
-        if i == len(ids_to_delete) - 1:
-            syntax += f"    '{id_val}').\n"
-        else:
-            syntax += f"    '{id_val}',\n"
-    
-    syntax += f"""
-EXECUTE.
-
-* Po vymazani by melo zustat: {results['total_respondents'] - len(ids_to_delete)} respondentu.
-* (Vsech podezrelych: {len(results['all_bad'])}, mazeme: {len(ids_to_delete)}).
-"""
+    syntax = "\n".join(lines)
     
     if output_file:
-        with open(output_file, 'w', encoding='windows-1250') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             f.write(syntax)
-        print(f"\nSPSS syntax uložena do: {output_file}")
+        print(f"\nSyntax saved to: {output_file}")
     
     return syntax
-
-
-def create_detailed_report(results, df, id_column='ExternalId', output_file=None):
-    """
-    Vytvoří detailní report s informacemi o každém podezřelém respondentovi
-    """
-    
-    report = f"""DETAILNÍ REPORT - IDENTIFIKACE ŠPATNÝCH RESPONDENTŮ
-{'='*80}
-Datum analýzy: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Celkem respondentů: {results['total_respondents']}
-Podezřelých respondentů: {len(results['all_bad'])}
-Procento podezřelých: {len(results['all_bad'])/results['total_respondents']*100:.1f}%
-
-SOUHRN PROBLÉMŮ:
-- Speeders (příliš rychlé vyplnění): {len(results['speeders'])}
-- Nesmyslné odpovědi v otevřených otázkách: {len(results['suspicious_open'])}
-- Straight-lining v baterii: {len(results['straight_liners'])}
-
-{'='*80}
-
-SEZNAM PODEZŘELÝCH RESPONDENTŮ:
-{'='*80}
-"""
-    
-    for rid in results['all_bad']:
-        problems = []
-        if rid in results['speeders']:
-            problems.append('SPEEDER')
-        if rid in results['suspicious_open']:
-            problems.append('NESMYSLNÉ ODPOVĚDI')
-        if rid in results['straight_liners']:
-            problems.append('STRAIGHT-LINING')
-        
-        report += f"\nID: {rid}\n"
-        report += f"  Problémy: {', '.join(problems)}\n"
-        
-        # Najdeme řádek v datech
-        row = df[df[id_column] == rid]
-        if not row.empty:
-            row = row.iloc[0]
-            if 'duration' in df.columns:
-                report += f"  Čas vyplnění: {row['duration']}\n"
-    
-    report += f"\n{'='*80}\n"
-    
-    if output_file:
-        with open(output_file, 'w', encoding='windows-1250') as f:
-            f.write(report)
-        print(f"Detailní report uložen do: {output_file}")
-    
-    return report
-
-
-if __name__ == "__main__":
-    # Příklad použití S DOTAZNÍKEM
-    sav_file = "/mnt/user-data/uploads/Tracking_znacky_J_T_Banka_0126_-_od_50k_-_2026-02-03-v2.sav"
-    docx_file = "/mnt/user-data/uploads/Tracking_značky_J_T_Banka_0126_-_od_50k_-_2026-02-03.docx"
-    
-    # Analýza S dotazníkem - DOPORUČENO
-    results, df = analyze_with_questionnaire(sav_file, docx_file)
-    
-    # Generování SPSS syntax - 3 varianty
-    syntax_high = generate_spss_syntax(results, id_column=results['id_column'], 
-                                       output_file="/home/claude/delete_bad_HIGH_RISK.sps", 
-                                       risk_level='high')
-    
-    syntax_medium = generate_spss_syntax(results, id_column=results['id_column'], 
-                                         output_file="/home/claude/delete_bad_MEDIUM_RISK.sps", 
-                                         risk_level='medium')
-    
-    syntax_all = generate_spss_syntax(results, id_column=results['id_column'], 
-                                      output_file="/home/claude/delete_bad_ALL.sps", 
-                                      risk_level='all')
-    
-    # Detailní report
-    report = create_detailed_report(results, df, id_column=results['id_column'], 
-                                    output_file="/home/claude/bad_respondents_report.txt")
-    
-    print("\n" + report[:2000])

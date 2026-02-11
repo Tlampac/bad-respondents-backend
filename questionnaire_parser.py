@@ -1,152 +1,184 @@
-#!/usr/bin/env python3
 """
-Parser dotazníku - extrahuje strukturu otázek z DOCX
+Questionnaire Parser - reads DOCX questionnaire files and extracts structure.
+Identifies: open questions, batteries, single-choice, multi-choice questions.
 """
 
-import mammoth
 import re
+
+try:
+    import mammoth
+except ImportError:
+    mammoth = None
+
+try:
+    from docx import Document as DocxDocument
+except ImportError:
+    DocxDocument = None
 
 
 def parse_questionnaire(docx_file):
     """
-    Parsuje dotazník a extrahuje otevřené otázky a baterie
+    Parse a DOCX questionnaire file and extract its structure.
     
-    Returns:
-        dict: {
-            'open_questions': [{'code': 'A1a', 'type': 'multi_field'/'text', 'text': '...'}],
-            'batteries': [{'code': 'A4', 'type': 'single_choice', 'text': '...'}]
-        }
+    Returns dict with:
+    - open_questions: list of open-ended questions (without filters)
+    - batteries: list of battery questions (matrix/grid)
+    - all_questions: list of all questions
     """
     
-    # Pokusíme se načíst mammoth, pokud selže, použijeme python-docx
-    text = None
-    try:
-        with open(docx_file, 'rb') as f:
-            result = mammoth.extract_raw_text(f)
-            text = result.value
-    except Exception as e:
-        print(f"Mammoth selhalo ({e}), zkouším python-docx...")
-        try:
-            import docx
-            doc = docx.Document(docx_file)
-            text = '\n'.join([para.text for para in doc.paragraphs])
-        except Exception as e2:
-            print(f"Python-docx také selhalo: {e2}")
-            return {'open_questions': [], 'batteries': []}
+    text = extract_text(docx_file)
     
     if not text:
-        return {'open_questions': [], 'batteries': []}
+        return {'open_questions': [], 'batteries': [], 'all_questions': []}
     
-    lines = text.split('\n')
+    return parse_structure(text)
+
+
+def extract_text(docx_file):
+    """Extract text from DOCX file."""
+    # Try mammoth first (better for complex docs)
+    if mammoth:
+        try:
+            with open(docx_file, 'rb') as f:
+                result = mammoth.extract_raw_text(f)
+                return result.value
+        except Exception:
+            pass
     
+    # Fallback to python-docx
+    if DocxDocument:
+        try:
+            doc = DocxDocument(docx_file)
+            paragraphs = [p.text for p in doc.paragraphs]
+            return '\n'.join(paragraphs)
+        except Exception:
+            pass
+    
+    return None
+
+
+def parse_structure(text):
+    """Parse questionnaire text into structured format."""
+    
+    questions = []
     open_questions = []
     batteries = []
     
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
+    lines = text.split('\n')
+    
+    current_question = None
+    current_options = []
+    current_type = None
+    has_filter = False
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
         
-        # Hledáme kód otázky (A1., B2., C3a., atd.)
-        match = re.match(r'^([A-Z]\d+[a-z]?)\.\s+(.+)', line)
-        if match:
-            code = match.group(1)
-            question_text = match.group(2)
-            
-            # Hledáme typ otázky v následujících řádcích
-            question_type = None
-            has_condition = False
-            
-            # Koukáme až 50 řádků dopředu (některé baterie mají dlouhé seznamy)
-            for j in range(i+1, min(i+50, len(lines))):
-                check_line = lines[j]
-                
-                # Zjistíme typ
-                if 'Vyberte typ otázky::' in check_line:
-                    question_type = check_line
-                
-                # Zjistíme zda má podmínku - musí být AŽ PO "Vyberte typ otázky"
-                if question_type and ('Pravidla' in check_line or 'ISCHECKED' in check_line):
-                    has_condition = True
-                    break
-                
-                # Pokud narazíme na další otázku, končíme
-                if re.match(r'^[A-Z]\d+[a-z]?\.\s+', check_line):
-                    break
-            
-            # Zpracujeme jen otázky BEZ podmínky
-            if question_type and not has_condition:
-                if 'OTEVŘENÁ OTÁZKA - VÍCE POLÍ PRO ODPOVĚĎ' in question_type:
-                    open_questions.append({
-                        'code': code,
-                        'type': 'multi_field',
-                        'text': question_text[:100]
-                    })
-                elif 'OTEVŘENÁ OTÁZKA - ODPOVĚĎ TEXT' in question_type:
-                    open_questions.append({
-                        'code': code,
-                        'type': 'text',
-                        'text': question_text[:100]
-                    })
-                elif 'BATERIE OTÁZEK - JEDNA MOŽNÁ ODPOVĚĎ' in question_type:
-                    batteries.append({
-                        'code': code,
-                        'type': 'single_choice',
-                        'text': question_text[:100]
-                    })
+        # Detect question start (Q1, Q2, Q6aB2, etc.)
+        q_match = re.match(r'^(Q\d+[a-zA-Z0-9]*(?:B\d+)*(?:B\d+)*)\.\s*(.*)', line)
         
-        i += 1
+        if q_match:
+            # Save previous question
+            if current_question:
+                q_info = {
+                    'code': current_question,
+                    'text': current_text,
+                    'type': current_type,
+                    'options': current_options,
+                    'has_filter': has_filter
+                }
+                questions.append(q_info)
+                
+                # Classify
+                if current_type == 'open' and not has_filter:
+                    open_questions.append(q_info)
+                elif current_type == 'battery':
+                    q_info['items'] = current_options
+                    batteries.append(q_info)
+            
+            # Start new question
+            current_question = q_match.group(1)
+            current_text = q_match.group(2).strip()
+            current_options = []
+            current_type = None
+            has_filter = False
+            continue
+        
+        # Detect question type
+        type_patterns = {
+            'open': [
+                r'OTEVŘENÁ OTÁZKA',
+                r'ODPOVĚĎ TEXT',
+                r'OTEVŘENÁ',
+            ],
+            'battery': [
+                r'BATERIE OTÁZEK',
+                r'BATERIE',
+            ],
+            'single': [
+                r'JEDNA MOŽNÁ ODPOVĚĎ',
+            ],
+            'multi': [
+                r'VÍCE MOŽNÝCH ODPOVĚDÍ',
+            ],
+            'text_only': [
+                r'POUZE TEXT',
+            ],
+            'end': [
+                r'KONEC DOTAZNÍKU',
+                r'VYLOUČENÍ RESPONDENTA',
+            ]
+        }
+        
+        for q_type, patterns in type_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, line, re.IGNORECASE):
+                    current_type = q_type
+                    break
+        
+        # Detect filters/rules
+        if re.search(r'IF\s*\(.*ISCHECKED', line, re.IGNORECASE):
+            has_filter = True
+        if re.search(r'THEN\s+EXIT', line, re.IGNORECASE):
+            has_filter = True
+        if re.search(r'Pravidla', line, re.IGNORECASE):
+            has_filter = True
+        
+        # Collect options (lines starting with -)
+        if line.startswith('-') or line.startswith('•'):
+            option_text = line.lstrip('-•').strip()
+            if option_text and not any(re.search(p, option_text, re.IGNORECASE) 
+                                       for patterns in type_patterns.values() 
+                                       for p in patterns):
+                if not re.search(r'Nastavení otázky|Povinná|Délka textu|Min\.|Max\.|Zvolených|Pravidla|IF\s*\(', option_text, re.IGNORECASE):
+                    current_options.append(option_text)
+    
+    # Don't forget the last question
+    if current_question:
+        q_info = {
+            'code': current_question,
+            'text': current_text,
+            'type': current_type,
+            'options': current_options,
+            'has_filter': has_filter
+        }
+        questions.append(q_info)
+        
+        if current_type == 'open' and not has_filter:
+            open_questions.append(q_info)
+        elif current_type == 'battery':
+            q_info['items'] = current_options
+            batteries.append(q_info)
+    
+    print(f"   Questionnaire parser results:")
+    print(f"   - Total questions: {len(questions)}")
+    print(f"   - Open questions (no filter): {len(open_questions)}")
+    print(f"   - Batteries: {len(batteries)}")
     
     return {
         'open_questions': open_questions,
-        'batteries': batteries
+        'batteries': batteries,
+        'all_questions': questions
     }
-
-
-def find_variable_names(df, question_code):
-    """
-    Najde proměnné v datech odpovídající kódu otázky (např. A1a -> QA1a)
-    
-    Args:
-        df: pandas DataFrame s daty
-        question_code: kód otázky z dotazníku (např. 'A1a', 'B2')
-    
-    Returns:
-        list: názvy proměnných
-    """
-    
-    # Možné varianty prefixu
-    variants = [
-        f'Q{question_code}',      # QA1a
-        f'Q{question_code.upper()}',  # QA1A
-        f'{question_code}',       # A1a (pokud by nebylo Q)
-    ]
-    
-    matching_vars = []
-    for col in df.columns:
-        for variant in variants:
-            if col.startswith(variant):
-                matching_vars.append(col)
-                break
-    
-    return sorted(list(set(matching_vars)))
-
-
-if __name__ == "__main__":
-    # Test
-    import sys
-    
-    if len(sys.argv) > 1:
-        docx_file = sys.argv[1]
-    else:
-        docx_file = "/mnt/user-data/uploads/Tracking_značky_J_T_Banka_0126_-_od_50k_-_2026-02-03.docx"
-    
-    print(f"Parsování: {docx_file}\n")
-    structure = parse_questionnaire(docx_file)
-    
-    print("=== OTEVŘENÉ OTÁZKY (bez podmínky) ===")
-    for q in structure['open_questions']:
-        print(f"{q['code']} ({q['type']}): {q['text']}")
-    
-    print(f"\n=== BATERIE (bez podmínky) ===")
-    for b in structure['batteries']:
-        print(f"{b['code']}: {b['text']}")

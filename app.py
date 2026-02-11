@@ -6,13 +6,13 @@ import tempfile
 from datetime import datetime
 import traceback
 
-# Import našich modulů
+# Import our modules
 from bad_respondents_detector import analyze_with_questionnaire
 from spss_syntax_unified import generate_spss_syntax_unified
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 
-# CORS konfigurace
+# CORS configuration
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.after_request
@@ -31,14 +31,14 @@ ALLOWED_DOCX = {'docx'}
 def allowed_file(filename, allowed_extensions):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_extensions
 
-# Hlavní stránka - serve frontend
+# Main page - serve frontend
 @app.route('/')
 def index():
     return send_from_directory('static', 'index.html')
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'message': 'Bad Respondents Detector API running'})
+    return jsonify({'status': 'ok', 'message': 'Bad Respondents Detector v2.0 API running'})
 
 @app.route('/api/analyze', methods=['POST', 'OPTIONS'])
 def analyze():
@@ -46,7 +46,7 @@ def analyze():
         return '', 204
         
     try:
-        # Kontrola souborů
+        # File validation
         if 'sav_file' not in request.files:
             return jsonify({'error': 'Chybí SAV soubor'}), 400
         
@@ -68,7 +68,7 @@ def analyze():
         if not allowed_file(docx_file.filename, ALLOWED_DOCX):
             return jsonify({'error': 'Dotazník musí mít příponu .docx'}), 400
         
-        # Uložení souborů
+        # Save files
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         sav_filename = f"{timestamp}_{secure_filename(sav_file.filename)}"
         docx_filename = f"{timestamp}_{secure_filename(docx_file.filename)}"
@@ -81,10 +81,10 @@ def analyze():
         
         print(f"Analyzing: {sav_path} with {docx_path}")
         
-        # Analýza
+        # Analysis
         results, df = analyze_with_questionnaire(sav_path, docx_path)
         
-        # Generování syntaxe
+        # Generate syntax
         syntax_filename = f"delete_bad_{timestamp}.sps"
         syntax_path = os.path.join(app.config['UPLOAD_FOLDER'], syntax_filename)
         
@@ -92,7 +92,7 @@ def analyze():
                                               id_column=results['id_column'], 
                                               output_file=syntax_path)
         
-        # Vrátíme výsledky jako JSON
+        # Return results as JSON
         response_data = {
             'success': True,
             'results': {
@@ -105,7 +105,9 @@ def analyze():
                     'threshold_min': results.get('speeder_threshold_min', 0)
                 },
                 'suspicious_open': {
-                    'count': len(results['suspicious_open'])
+                    'count': len(results['suspicious_open']) + len(results.get('suspicious_open_medium', [])),
+                    'high_risk_count': len(results['suspicious_open']),
+                    'medium_risk_count': len(results.get('suspicious_open_medium', []))
                 },
                 'straight_liners': {
                     'count': len(results['straight_liners'])
@@ -156,7 +158,7 @@ def download(filename):
                            download_name=filename,
                            mimetype='text/plain')
         
-        # Cleanup po stažení
+        # Cleanup after download
         @response.call_on_close
         def cleanup():
             try:

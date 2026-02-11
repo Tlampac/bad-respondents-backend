@@ -1,95 +1,95 @@
+"""
+SPSS Syntax Generator - generates SPSS syntax for deleting bad respondents.
+Unified version supporting multiple syntax variants.
+"""
+
+from datetime import datetime
+
+
 def generate_spss_syntax_unified(results, id_column='ExternalId', output_file=None):
     """
-    Generuje SPSS syntax se všemi 3 variantami v jednom souboru.
-    Každá varianta je připravená ke spuštění - stačí smazat ostatní varianty.
+    Generate SPSS syntax with 3 variants for deleting bad respondents.
     """
+    lines = []
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
-    ids_high = results['recommendations']['high_risk']
-    ids_medium = results['recommendations']['high_risk'] + results['recommendations']['medium_risk']
-    ids_all = results['all_bad']
+    lines.append(f"* ================================================================.")
+    lines.append(f"* Bad Respondents Detector v2.0 - SPSS Syntax.")
+    lines.append(f"* Generated: {timestamp}.")
+    lines.append(f"* ================================================================.")
+    lines.append(f"* Total respondents: {results['total_respondents']}.")
+    lines.append(f"* Speeders: {len(results['speeders'])}.")
+    lines.append(f"* Suspicious open-ended (high risk): {len(results['suspicious_open'])}.")
+    lines.append(f"* Suspicious open-ended (medium risk): {len(results.get('suspicious_open_medium', []))}.")
+    lines.append(f"* Straight-liners: {len(results['straight_liners'])}.")
+    lines.append(f"* Total flagged: {len(results['all_bad'])}.")
+    lines.append(f"* HIGH RISK (recommend delete): {len(results['recommendations']['high_risk'])}.")
+    lines.append(f"* MEDIUM RISK (consider delete): {len(results['recommendations']['medium_risk'])}.")
+    lines.append(f"* ================================================================.")
+    lines.append(f"")
     
-    from datetime import datetime
+    def format_id_list(ids, id_col):
+        """Format list of IDs for SPSS syntax."""
+        if not ids:
+            return ""
+        
+        formatted = []
+        for x in ids:
+            if isinstance(x, str) or (isinstance(x, float) and not x.is_integer()):
+                formatted.append(f"'{str(x)}'")
+            else:
+                formatted.append(str(int(x)) if isinstance(x, float) else str(x))
+        
+        # Split into lines of max ~10 IDs for readability
+        chunks = []
+        for i in range(0, len(formatted), 10):
+            chunk = ", ".join(formatted[i:i+10])
+            chunks.append(chunk)
+        
+        return ",\n    ".join(chunks)
     
-    syntax = f"""* ============================================================================.
-* IDENTIFIKACE ŠPATNÝCH RESPONDENTŮ
-* ============================================================================.
-* Generováno: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.
-* Celkem analyzováno: {results['total_respondents']} respondentů.
-* Celkem identifikováno: {len(results['all_bad'])} podezřelých.
-*
-* RIZIKOVÉ KATEGORIE:
-* - Všechny 3 problémy: {len(results['risk_groups']['all_three'])}.
-* - Rychlí + špatné otevřenky: {len(results['risk_groups']['speeders_open'])}.
-* - Rychlí + straight-lining: {len(results['risk_groups']['speeders_straight'])}.
-* - Špatné otevřenky + straight-lining: {len(results['risk_groups']['open_straight'])}.
-* - Pouze rychlí: {len(results['risk_groups']['speeders_only'])}.
-* - Pouze špatné otevřenky: {len(results['risk_groups']['open_only'])}.
-* - Pouze straight-lining: {len(results['risk_groups']['straight_only'])}.
-*
-* DETEKOVANÉ PROBLÉMY:
-* 1. SPEEDERS: {len(results['speeders'])} respondentů.
-*    Rychlost <= {results.get('speeder_threshold_sec', 0):.0f}s ({results.get('speeder_threshold_min', 0):.1f} min).
-* 2. NESMYSLNÉ ODPOVĚDI: {len(results['suspicious_open'])} respondentů.
-* 3. STRAIGHT-LINING: {len(results['straight_liners'])} respondentů.
-*    Délka baterie: {results.get('battery_length', 'N/A')} položek.
-*
-* ============================================================================.
-* TŘI VARIANTY - vyberte jednu a SMAŽTE ostatní dvě sekce.
-* ============================================================================.
-
-
-* ============================================================================.
-* VARIANTA 1: VYSOKÉ RIZIKO (DOPORUČENO).
-* Maže {len(ids_high)} respondentů. Zůstane: {results['total_respondents'] - len(ids_high)}.
-* ============================================================================.
-SELECT IF NOT ANY({id_column},
-"""
+    # Variant 1: Delete ALL flagged
+    all_bad = results['all_bad']
+    lines.append(f"* === VARIANTA 1: Smazat VSE podezrele ({len(all_bad)} respondents) ===.")
+    if all_bad:
+        id_list = format_id_list(all_bad, id_column)
+        lines.append(f"SELECT IF NOT ANY({id_column},")
+        lines.append(f"    {id_list}).")
+        lines.append(f"EXECUTE.")
+    else:
+        lines.append(f"* Zadni podezreli respondenti nenalezeni.")
+    lines.append(f"")
     
-    for i, id_val in enumerate(ids_high):
-        if i == len(ids_high) - 1:
-            syntax += f"    '{id_val}').\n"
-        else:
-            syntax += f"    '{id_val}',\n"
+    # Variant 2: Delete only HIGH RISK
+    high_risk = results['recommendations']['high_risk']
+    lines.append(f"* === VARIANTA 2: Smazat pouze VYSOKE RIZIKO ({len(high_risk)} respondents) ===.")
+    if high_risk:
+        id_list = format_id_list(high_risk, id_column)
+        lines.append(f"* SELECT IF NOT ANY({id_column},")
+        lines.append(f"*     {id_list}).")
+        lines.append(f"* EXECUTE.")
+    else:
+        lines.append(f"* Zadni vysoko rizikovi respondenti nenalezeni.")
+    lines.append(f"")
     
-    syntax += "EXECUTE.\n\n\n"
+    # Variant 3: Delete HIGH + MEDIUM
+    hm_risk = high_risk + results['recommendations']['medium_risk']
+    lines.append(f"* === VARIANTA 3: Smazat VYSOKE + STREDNI RIZIKO ({len(hm_risk)} respondents) ===.")
+    if hm_risk:
+        id_list = format_id_list(hm_risk, id_column)
+        lines.append(f"* SELECT IF NOT ANY({id_column},")
+        lines.append(f"*     {id_list}).")
+        lines.append(f"* EXECUTE.")
+    else:
+        lines.append(f"* Zadni respondenti v teto kategorii.")
+    lines.append(f"")
     
-    syntax += f"""* ============================================================================.
-* VARIANTA 2: STŘEDNÍ RIZIKO.
-* Maže {len(ids_medium)} respondentů. Zůstane: {results['total_respondents'] - len(ids_medium)}.
-* ============================================================================.
-SELECT IF NOT ANY({id_column},
-"""
+    lines.append(f"* === KONEC SYNTAXE ===.")
     
-    for i, id_val in enumerate(ids_medium):
-        if i == len(ids_medium) - 1:
-            syntax += f"    '{id_val}').\n"
-        else:
-            syntax += f"    '{id_val}',\n"
-    
-    syntax += "EXECUTE.\n\n\n"
-    
-    syntax += f"""* ============================================================================.
-* VARIANTA 3: VŠICHNI PODEZŘELÍ.
-* Maže {len(ids_all)} respondentů. Zůstane: {results['total_respondents'] - len(ids_all)}.
-* ============================================================================.
-SELECT IF NOT ANY({id_column},
-"""
-    
-    for i, id_val in enumerate(ids_all):
-        if i == len(ids_all) - 1:
-            syntax += f"    '{id_val}').\n"
-        else:
-            syntax += f"    '{id_val}',\n"
-    
-    syntax += "EXECUTE.\n"
+    syntax = "\n".join(lines)
     
     if output_file:
-        with open(output_file, 'w', encoding='windows-1250') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             f.write(syntax)
-        print(f"\nSPSS syntax uložena do: {output_file}")
-        print(f"  INSTRUKCE: Vyberte JEDNU variantu a smažte ostatní dvě sekce SELECT IF")
-        print(f"  - VYSOKÉ RIZIKO: {len(ids_high)} respondentů")
-        print(f"  - STŘEDNÍ RIZIKO: {len(ids_medium)} respondentů")  
-        print(f"  - VŠICHNI: {len(ids_all)} respondentů")
     
     return syntax
