@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bad Respondents Detector v2.0</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 28px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .upload-section {
+            margin-bottom: 30px;
+        }
+        
+        .upload-box {
+            border: 2px dashed #ddd;
+            border-radius: 12px;
+            padding: 30px;
+            text-align: center;
+            transition: all 0.3s;
+            cursor: pointer;
+            margin-bottom: 15px;
+        }
+        
+        .upload-box:hover {
+            border-color: #667eea;
+            background: #f8f9ff;
+        }
+        
+        .upload-box.has-file {
+            border-color: #4caf50;
+            background: #f1f8f4;
+        }
+        
+        .upload-icon {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+        
+        .file-label {
+            font-size: 16px;
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .file-name {
+            font-size: 14px;
+            color: #666;
+            margin-top: 10px;
+        }
+        
+        input[type="file"] {
+            display: none;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 16px 40px;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            width: 100%;
+            margin-top: 20px;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .loading.active {
+            display: block;
+        }
+        
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .results {
+            display: none;
+            margin-top: 30px;
+        }
+        
+        .results.active {
+            display: block;
+        }
+        
+        .results-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+        
+        .stat-card {
+            background: #f8f9ff;
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+            border: 2px solid #e8ebff;
+        }
+        
+        .stat-card.danger {
+            background: #fff5f5;
+            border-color: #ffd4d4;
+        }
+        
+        .stat-card.warning {
+            background: #fffbf0;
+            border-color: #ffe4a3;
+        }
+        
+        .stat-number {
+            font-size: 32px;
+            font-weight: 700;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+        
+        .stat-card.danger .stat-number {
+            color: #e53e3e;
+        }
+        
+        .stat-card.warning .stat-number {
+            color: #d97706;
+        }
+        
+        .stat-label {
+            font-size: 13px;
+            color: #666;
+            font-weight: 500;
+        }
+        
+        .detail-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .detail-section h3 {
+            font-size: 16px;
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+        }
+        
+        .detail-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .detail-item:last-child {
+            border-bottom: none;
+        }
+        
+        .detail-label {
+            font-size: 13px;
+            color: #666;
+        }
+        
+        .detail-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .download-btn {
+            background: #4caf50;
+            color: white;
+            border: none;
+            padding: 14px 30px;
+            font-size: 15px;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            width: 100%;
+            margin-top: 10px;
+        }
+        
+        .download-btn:hover {
+            background: #45a049;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(76, 175, 80, 0.4);
+        }
+        
+        .error {
+            background: #fff5f5;
+            border: 2px solid #fc8181;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+            color: #c53030;
+            display: none;
+        }
+        
+        .error.active {
+            display: block;
+        }
+        
+        .error-title {
+            font-weight: 600;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        
+        .error-message {
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        
+        .info {
+            background: #e6f7ff;
+            border: 2px solid #91d5ff;
+            border-radius: 12px;
+            padding: 15px;
+            margin: 20px 0;
+            color: #0050b3;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 Bad Respondents Detector v2.0</h1>
+            <p>Identifikace problematických respondentů pomocí AI scoring</p>
+        </div>
+        
+        <div class="content">
+            <div class="info">
+                <strong>💡 Tip:</strong> Nahrajte SAV soubor s daty a DOCX soubor s dotazníkem pro nejpřesnější detekci
+            </div>
+            
+            <div class="upload-section">
+                <div class="upload-box" id="savBox" onclick="document.getElementById('savFile').click()">
+                    <div class="upload-icon">📊</div>
+                    <div class="file-label">SAV soubor s daty</div>
+                    <div class="file-name" id="savFileName">Klikněte pro výběr souboru</div>
+                </div>
+                <input type="file" id="savFile" accept=".sav" onchange="handleFileSelect('sav')">
+                
+                <div class="upload-box" id="docxBox" onclick="document.getElementById('docxFile').click()">
+                    <div class="upload-icon">📄</div>
+                    <div class="file-label">DOCX dotazník</div>
+                    <div class="file-name" id="docxFileName">Klikněte pro výběr souboru</div>
+                </div>
+                <input type="file" id="docxFile" accept=".docx" onchange="handleFileSelect('docx')">
+                
+                <button class="btn" id="analyzeBtn" onclick="analyzeData()" disabled>
+                    Analyzovat data
+                </button>
+            </div>
+            
+            <div class="error" id="errorBox">
+                <div class="error-title">⚠️ Chyba</div>
+                <div class="error-message" id="errorMessage"></div>
+            </div>
+            
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>Analyzuji data... Může to trvat několik sekund.</p>
+            </div>
+            
+            <div class="results" id="results">
+                <h2 style="margin-bottom: 20px; color: #333;">📈 Výsledky analýzy</h2>
+                
+                <div class="results-grid">
+                    <div class="stat-card">
+                        <div class="stat-number" id="totalRespondents">-</div>
+                        <div class="stat-label">Celkem respondentů</div>
+                    </div>
+                    <div class="stat-card danger">
+                        <div class="stat-number" id="totalBad">-</div>
+                        <div class="stat-label">Podezřelých celkem</div>
+                    </div>
+                    <div class="stat-card danger">
+                        <div class="stat-number" id="highRisk">-</div>
+                        <div class="stat-label">Vysoké riziko</div>
+                    </div>
+                    <div class="stat-card warning">
+                        <div class="stat-number" id="mediumRisk">-</div>
+                        <div class="stat-label">Střední riziko</div>
+                    </div>
+                </div>
+                
+                <div class="detail-section">
+                    <h3>🚀 Speeders (rychlí vyplňovači)</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <span class="detail-label">Počet:</span>
+                            <span class="detail-value" id="speedersCount">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Práh:</span>
+                            <span class="detail-value" id="speedersThreshold">-</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="detail-section">
+                    <h3>📝 Podezřelé odpovědi (AI scoring)</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <span class="detail-label">Vysoké riziko:</span>
+                            <span class="detail-value" id="openHighRisk">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Střední riziko:</span>
+                            <span class="detail-value" id="openMediumRisk">-</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="detail-section">
+                    <h3>➖ Straight-liners</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <span class="detail-label">Počet:</span>
+                            <span class="detail-value" id="straightLinersCount">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Délka baterií:</span>
+                            <span class="detail-value" id="batteryLength">-</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="detail-section">
+                    <h3>🔀 Kombinace problémů</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <span class="detail-label">Všechny 3:</span>
+                            <span class="detail-value" id="allThree">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Speeders + Open:</span>
+                            <span class="detail-value" id="speedersOpen">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Speeders + Straight:</span>
+                            <span class="detail-value" id="speedersStraight">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Open + Straight:</span>
+                            <span class="detail-value" id="openStraight">-</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <button class="download-btn" id="downloadBtn" onclick="downloadSyntax()">
+                    ⬇️ Stáhnout SPSS syntaxi
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let savFile = null;
+        let docxFile = null;
+        let syntaxFile = null;
+
+        function handleFileSelect(type) {
+            const fileInput = document.getElementById(type + 'File');
+            const fileName = document.getElementById(type + 'FileName');
+            const box = document.getElementById(type + 'Box');
+            
+            if (fileInput.files.length > 0) {
+                if (type === 'sav') {
+                    savFile = fileInput.files[0];
+                } else {
+                    docxFile = fileInput.files[0];
+                }
+                fileName.textContent = fileInput.files[0].name;
+                box.classList.add('has-file');
+            } else {
+                if (type === 'sav') {
+                    savFile = null;
+                } else {
+                    docxFile = null;
+                }
+                fileName.textContent = 'Klikněte pro výběr souboru';
+                box.classList.remove('has-file');
+            }
+            
+            // Enable button if both files selected
+            document.getElementById('analyzeBtn').disabled = !(savFile && docxFile);
+        }
+
+        function showError(message) {
+            const errorBox = document.getElementById('errorBox');
+            const errorMessage = document.getElementById('errorMessage');
+            errorMessage.textContent = message;
+            errorBox.classList.add('active');
+            
+            // Auto-hide after 10 seconds
+            setTimeout(() => {
+                errorBox.classList.remove('active');
+            }, 10000);
+        }
+
+        function hideError() {
+            document.getElementById('errorBox').classList.remove('active');
+        }
+
+        async function analyzeData() {
+            if (!savFile || !docxFile) {
+                showError('Prosím vyberte oba soubory (SAV i DOCX)');
+                return;
+            }
+
+            hideError();
+            
+            // Show loading
+            document.getElementById('loading').classList.add('active');
+            document.getElementById('results').classList.remove('active');
+            document.getElementById('analyzeBtn').disabled = true;
+
+            const formData = new FormData();
+            formData.append('sav_file', savFile);
+            formData.append('docx_file', docxFile);
+
+            try {
+                console.log('Sending analysis request...');
+                
+                const response = await fetch('/api/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                console.log('Response status:', response.status);
+                console.log('Response headers:', response.headers);
+
+                // Check content type before parsing
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    console.error('Non-JSON response:', text);
+                    throw new Error('Server vrátil neplatnou odpověď (ne JSON). Zkontrolujte konzoli serveru.');
+                }
+
+                const data = await response.json();
+                console.log('Response data:', data);
+
+                // Check for success flag
+                if (!data.success || data.error) {
+                    throw new Error(data.error || 'Neznámá chyba při analýze');
+                }
+
+                // Display results
+                displayResults(data.results);
+                syntaxFile = data.syntax_file;
+
+            } catch (error) {
+                console.error('Analysis error:', error);
+                showError(`Chyba při analýze: ${error.message}`);
+            } finally {
+                document.getElementById('loading').classList.remove('active');
+                document.getElementById('analyzeBtn').disabled = false;
+            }
+        }
+
+        function displayResults(results) {
+            // Main stats
+            document.getElementById('totalRespondents').textContent = results.total_respondents;
+            document.getElementById('totalBad').textContent = results.total_bad;
+            document.getElementById('highRisk').textContent = results.recommendations.high_risk;
+            document.getElementById('mediumRisk').textContent = results.recommendations.medium_risk;
+
+            // Speeders
+            document.getElementById('speedersCount').textContent = results.speeders.count;
+            document.getElementById('speedersThreshold').textContent = 
+                `< ${results.speeders.threshold_min} min`;
+
+            // Open-ended
+            document.getElementById('openHighRisk').textContent = results.suspicious_open.high_risk_count;
+            document.getElementById('openMediumRisk').textContent = results.suspicious_open.medium_risk_count;
+
+            // Straight-liners
+            document.getElementById('straightLinersCount').textContent = results.straight_liners.count;
+            document.getElementById('batteryLength').textContent = 
+                results.battery_length === 'N/A' ? 'N/A' : `${results.battery_length} položek`;
+
+            // Risk groups
+            document.getElementById('allThree').textContent = results.risk_groups.all_three;
+            document.getElementById('speedersOpen').textContent = results.risk_groups.speeders_open;
+            document.getElementById('speedersStraight').textContent = results.risk_groups.speeders_straight;
+            document.getElementById('openStraight').textContent = results.risk_groups.open_straight;
+
+            // Show results
+            document.getElementById('results').classList.add('active');
+        }
+
+        async function downloadSyntax() {
+            if (!syntaxFile) {
+                showError('Soubor syntaxe není k dispozici');
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/download/${syntaxFile}`);
+                
+                if (!response.ok) {
+                    throw new Error('Chyba při stahování souboru');
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = syntaxFile;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+
+            } catch (error) {
+                console.error('Download error:', error);
+                showError(`Chyba při stahování: ${error.message}`);
+            }
+        }
+
+        // Check server health on load
+        window.addEventListener('load', async () => {
+            try {
+                const response = await fetch('/health');
+                const data = await response.json();
+                
+                if (data.status !== 'ok') {
+                    showError('Server není správně nakonfigurován. Chybí potřebné Python moduly.');
+                    console.error('Health check failed:', data);
+                }
+            } catch (error) {
+                console.error('Health check error:', error);
+                showError('Nelze se připojit k serveru. Zkontrolujte, zda běží.');
+            }
+        });
+    </script>
+</body>
+</html>
