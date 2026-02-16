@@ -1,7 +1,0 @@
-Flask
-Flask-CORS
-pyreadstat
-pandas
-mammoth
-python-docx
-gunicorn
